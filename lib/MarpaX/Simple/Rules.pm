@@ -1,22 +1,28 @@
 package MarpaX::Simple::Rules;
 use strict;
 
-our $VERSION='0.2.2';
+our $VERSION='0.2.6';
 
 use Marpa::XS;
-use parent 'Exporter';
+use base 'Exporter';
 
 our @EXPORT_OK = qw/parse_rules/;
 
-sub Rules { shift; return \@_; } 
-sub Rule { shift; return { @{$_[0]}, @{$_[2]} }; }
-sub RuleWithAction { shift; return { @{$_[0]}, @{$_[2]}, action => $_[4] }; }
+sub MissingRHS {my $m=shift;push @{$m->{error}}, 'Missing "::=" operator'; }
+sub MissingLHS {my $m=shift;push @{$m->{error}}, 'Missing name left of "::=" operator'; }
+sub Rules { my $m = shift; return { m => $m, rules => \@_ }; } 
+sub Rule { shift; return { @{$_[0]}, @{$_[2]}, @{$_[3]||[]} }; }
+sub Rule2 { shift; return { @{$_[0]}, rhs => [], @{$_[2]||[]} }; }
 sub Lhs { shift; return [lhs => $_[0]];}
 sub Rhs { shift; return [rhs => $_[0]];}
 sub Star { shift; return [rhs => [ $_[0] ], min => 0]; }
 sub Plus { shift; return [rhs => [ $_[0] ], min => 1]; }
 sub Names { shift; return [@_];}
 sub Null { shift; return [rhs => []]; }
+sub Action {
+    my (undef, $arrow, $name) = @_;
+    return [action => $name];
+}
 
 sub parse_rules {
     my ($string) = @_;
@@ -24,57 +30,76 @@ sub parse_rules {
     my $grammar = Marpa::XS::Grammar->new({
         start   => 'Rules',
         actions => __PACKAGE__,
-        
         rules => [
-            { lhs => 'Rules',     rhs => [qw/Rule/],                min => 1 },
-            { lhs => 'Rule',      rhs => [qw/Lhs ::= Rhs/],         action => 'Rule' },
-            { lhs => 'Rule',      rhs => [qw/Lhs ::= Rhs => Name/], action => 'RuleWithAction' },
-            { lhs => 'Lhs',       rhs => [qw/Name/] },
-            { lhs => 'Rhs',       rhs => [qw/Names/] },
-            { lhs => 'Rhs',       rhs => [qw/Name +/],              action => 'Plus' },
-            { lhs => 'Rhs',       rhs => [qw/Name */],              action => 'Star' },
-            { lhs => 'Rhs',       rhs => [qw/Null/],                action => 'Null' },
-            { lhs => 'Names',     rhs => [qw/Name/],                min => 1 },
-        ],
+            { lhs => 'Rules',     rhs => [qw/Rule/],                                     action => 'Rules', min => 1 },
+            { lhs => 'Rule',      rhs => [qw/Lhs/],                                      action => 'MissingRHS' },
+            { lhs => 'Rule',      rhs => [qw/DeclareOp/],                                action => 'MissingLHS' },
+            { lhs => 'Rule',      rhs => [qw/Lhs DeclareOp Rhs Action/],                 action => 'Rule' },
+            { lhs => 'Rule',      rhs => [qw/Lhs DeclareOp Action/],                     action => 'Rule2' },
 
-        lhs_terminals => 0,
+            { lhs => 'Action',    rhs => [],                                             action => 'Action' },
+            { lhs => 'Action',    rhs => [qw/ActionArrow ActionName/],                   action => 'Action' },
+            { lhs => 'Action',    rhs => [qw/ActionArrow Name/],                         action => 'Action' },
+
+            { lhs => 'Lhs',       rhs => [qw/Name/],                                     action => 'Lhs' },
+
+            { lhs => 'Rhs',       rhs => [qw/Names/],                                    action => 'Rhs' },
+            { lhs => 'Rhs',       rhs => [qw/Name Plus/],                                action => 'Plus' },
+            { lhs => 'Rhs',       rhs => [qw/Name Star/],                                action => 'Star' },
+            { lhs => 'Rhs',       rhs => [qw/Null/],                                     action => 'Null' },
+
+            { lhs => 'Names',     rhs => [qw/Name/],                                     action => 'Names', min => 1 },
+        ],
+        terminals => [qw/DeclareOp ActionArrow Name ActionName Plus Star Null/],
     });
     $grammar->precompute;
 
     my $rec = Marpa::XS::Recognizer->new({grammar => $grammar});
 
     my @tokens = split /\s+/, $string;
-    for (@tokens) {
-        next if m/^\s*$/;
 
-        if (m/^::=$/) {
-            $rec->read('::=');
-        }
-        elsif (m/^Null$/) {
-            $rec->read('Null');
-        }
-        elsif (m/^=>$/) {
-            $rec->read('=>');
-        }
-        elsif (m/^[+]$/) {
-            $rec->read('+');
-        }
-        elsif (m/^[*]$/) {
-            $rec->read('*');
-        }
-        elsif (m/^(\w+)$/) {
-            $rec->read('Name', $1);
-        }
-        elsif (m/^(\w+)([+*]?)$/) {
-            $rec->read('Name', $1);
-            $rec->read($2, $2);
+    if (!@tokens) {
+        return [];
+    }
+
+    my @terminals = (
+        [ 'DeclareOp', '::=' ],
+        [ 'ActionName', qr/(::(whatever|undef))/ ],
+        [ 'Null', 'Null' ],
+        [ 'ActionArrow', '=>' ],
+        [ 'Plus', '\+' ],
+        [ 'Star', '\*' ],
+        [ 'Name', qr/\w+/, ],
+    );
+
+    TOKEN: for my $token (@tokens) {
+        next if $token =~ m/^\s*$/;
+
+        for my $t (@terminals) {
+            if ($token =~ m/^($t->[1])/) {
+                $rec->read($t->[0], $2 // $1);
+                $token =~ s/$t->[1]//;
+                if ($token) {
+                    redo TOKEN;
+                }
+                next TOKEN;
+            }
         }
     }
 
     $rec->end_input;
-    my $rules = ${$rec->value};
 
-    return $rules;
+    my $parse_ref = $rec->value;
+
+    if (!defined $parse_ref) {
+        die "Can't parse";
+    }
+    my $parse = $$parse_ref;
+
+    if (ref($parse->{m}{error}) eq 'ARRAY' && @{$parse->{m}{error}}) {
+        die join ": ", @{$parse->{m}{error}};
+    }
+    return $parse->{rules};
 }
 
 1;
