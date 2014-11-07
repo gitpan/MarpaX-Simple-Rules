@@ -1,15 +1,14 @@
 package MarpaX::Simple::Rules;
 use strict;
 
-our $VERSION='0.2.6';
+our $VERSION='0.2.7';
 
 use Marpa::XS;
+use Data::Dumper;
 use base 'Exporter';
 
 our @EXPORT_OK = qw/parse_rules/;
 
-sub MissingRHS {my $m=shift;push @{$m->{error}}, 'Missing "::=" operator'; }
-sub MissingLHS {my $m=shift;push @{$m->{error}}, 'Missing name left of "::=" operator'; }
 sub Rules { my $m = shift; return { m => $m, rules => \@_ }; } 
 sub Rule { shift; return { @{$_[0]}, @{$_[2]}, @{$_[3]||[]} }; }
 sub Rule2 { shift; return { @{$_[0]}, rhs => [], @{$_[2]||[]} }; }
@@ -32,8 +31,7 @@ sub parse_rules {
         actions => __PACKAGE__,
         rules => [
             { lhs => 'Rules',     rhs => [qw/Rule/],                                     action => 'Rules', min => 1 },
-            { lhs => 'Rule',      rhs => [qw/Lhs/],                                      action => 'MissingRHS' },
-            { lhs => 'Rule',      rhs => [qw/DeclareOp/],                                action => 'MissingLHS' },
+
             { lhs => 'Rule',      rhs => [qw/Lhs DeclareOp Rhs Action/],                 action => 'Rule' },
             { lhs => 'Rule',      rhs => [qw/Lhs DeclareOp Action/],                     action => 'Rule2' },
 
@@ -56,9 +54,8 @@ sub parse_rules {
 
     my $rec = Marpa::XS::Recognizer->new({grammar => $grammar});
 
-    my @tokens = split /\s+/, $string;
-
-    if (!@tokens) {
+    my @lines  = split /\n/, $string;
+    if (!@lines) {
         return [];
     }
 
@@ -72,33 +69,64 @@ sub parse_rules {
         [ 'Name', qr/\w+/, ],
     );
 
-    TOKEN: for my $token (@tokens) {
-        next if $token =~ m/^\s*$/;
+    my $nr = 1;
 
-        for my $t (@terminals) {
-            if ($token =~ m/^($t->[1])/) {
-                $rec->read($t->[0], $2 // $1);
-                $token =~ s/$t->[1]//;
-                if ($token) {
-                    redo TOKEN;
+    LINE: for my $line (@lines) {
+        my @tokens = split /\s+/, $line;
+
+        TOKEN: for my $token (@tokens) {
+            next if $token =~ m/^\s*$/;
+
+            for my $t (@terminals) {
+                if ($token =~ m/^($t->[1])/) {
+
+                    if (!$rec->read($t->[0], $2 // $1)) {
+                        if ($t->[0] eq 'DeclareOp') {
+                            die "Error: Parse exhausted, " . (join ", ", @{$rec->terminals_expected}) 
+                                . " expected before '::=' at line $nr";
+                        }
+                        else {
+                            die "Error: Parse exhausted, " . (join ", ", @{$rec->terminals_expected})
+                                . " expected at line $nr";
+                        }
+                    }
+
+                    $token =~ s/$t->[1]//;
+
+                    if ($token) {
+                        redo TOKEN;
+                    }
+
+                    next TOKEN;
                 }
-                next TOKEN;
             }
+
+            die "Error: Found '$token', " . (join ", ", @{$rec->terminals_expected}) . " expected at line $nr";
         }
     }
+    continue {
+        $nr++;
+    }
 
-    $rec->end_input;
+    #if (grep {$_ eq 'DeclareOp'} @{$rec->terminals_expected}) {
+    #print Dumper($rec->terminals_expected);
+    #$nr--;
+    #die "Input incomplete DeclareOp expected at line $nr";
+    #}
+
+    #$rec->end_input;
 
     my $parse_ref = $rec->value;
 
     if (!defined $parse_ref) {
-        die "Can't parse";
+        return [];
     }
+
     my $parse = $$parse_ref;
 
-    if (ref($parse->{m}{error}) eq 'ARRAY' && @{$parse->{m}{error}}) {
-        die join ": ", @{$parse->{m}{error}};
-    }
+#    if (ref($parse->{m}{error}) eq 'ARRAY' && @{$parse->{m}{error}}) {
+#        die join ": ", @{$parse->{m}{error}};
+#    }
     return $parse->{rules};
 }
 
@@ -109,6 +137,16 @@ __END__
 =head1 NAME
 
 MarpaX::Simple::Rules - Simple definition language for rules
+
+=head1 WARNING
+
+MarpaX::Simple::Rules depends on a deprecated module called Marpa::XS. That
+module will be (or is already) removed from CPAN.
+
+MarpaX::Simple::Rules served as an inspiration to a new interface called
+L<Marpa::R2::Scanless> (SLIF), which features similar syntax and more features.
+Where MarpaX::Simple::Rules only parsed BNF rules, SLIF will also tokenize your
+input. SLIF is the way forward for all new projects.
 
 =head1 SYNOPSYS
 
@@ -206,7 +244,7 @@ Peter Stuifzand E<lt>peter@stuifzand.euE<gt>
 
 =head1 COPYRIGHT
 
-Copyright (c) 2012 Peter Stuifzand.  All rights reserved.
+Copyright (c) 2012-2014 Peter Stuifzand.  All rights reserved.
 
 =cut
 
